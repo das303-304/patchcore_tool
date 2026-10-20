@@ -1,0 +1,14 @@
+{
+  "cam": 2,
+  "folder": "C:/Users/Administrator/Desktop/PatchCore/ok_data/皮料相机2/good",
+  "roi": [
+    29,
+    25,
+    1456,
+    1274
+  ],
+  "target": 6000,
+  "ng_dir": "C:/Users/Administrator/Desktop/NG/CAM2",
+  "deploy_dir": "E:/ATK/转盘机视觉/XVision/bin/Debug/net8.0-windows/PatchCore/cam2",
+  "backbone": "resnet50"
+}
