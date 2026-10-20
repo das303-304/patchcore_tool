@@ -200,4 +200,4 @@ cd bench/GpuProbe && dotnet publish -c Release -r win-x64 --self-contained false
 
 ## License
 
-内部工程代码，未公开授权。
+[Apache License 2.0](LICENSE)
