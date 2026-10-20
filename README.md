@@ -1,200 +1,187 @@
 # PatchCore Tool
 
-工业视觉用的 **PatchCore 无监督缺陷检测**工具集：只用 OK 图建记忆库，检测未见过的不良。
-本仓库是它在「Python 建库 → ONNX 导出 → C# 产线集成」整条链路上的源码与工程记录。
+工业视觉用的 **PatchCore 无监督缺陷检测**内核与建库工具：只用 OK 图建记忆库，
+检测未见过的不良，不需要标注、不需要训练。
 
-> 这套代码是从产线工程 `XVision` 中抽出来的独立副本。C# 部分依赖 `Sen.Engine` 视觉框架
-> （`VisionToolBase` / `VsToolGroup` / `HWndCtrl`），**不能脱离框架单独编译**，详见
-> [C# 集成](#c-集成到-vision-框架)。
-
----
-
-## 组成
-
-| 目录 | 内容 |
-|---|---|
-| `python/` | 建库工具（带 Web UI）、ONNX 导出、检测验证、阈值标定 |
-| `python/tools/` | 开发期分析脚本归档：骨干对比、kNN 基准、NG/OK 评估、报告生成 |
-| `csharp/Sen.Engine/VisionTool/patchcore/` | 产线工具：引擎封装 + 工具逻辑 + 参数界面 |
-| `csharp/probe_tool/` | 独立的推理探针（不依赖视觉框架，可单独跑） |
-| `bench/` | 性能与 GPU 环境诊断工具（CPU/CUDA 对比、GPU 体检） |
-| `docs/` | 集成方案与调参记录 |
+面向皮料/织物等纹理类表面缺陷检测，已在产线验证。支持多相机独立建库、
+阈值标定、ONNX 导出与部署验证。
 
 ---
 
-## Python 建库
+## 目录结构
 
-环境要求：Python 3.9+，PyTorch（有 GPU 更快），见 `python/requirements-frozen.txt`。
+```
+.
+├── build_tool.py              建库主程序（含 Web UI 服务）
+├── build_tool_ui.html         建库界面（单页，由 build_tool.py 提供）
+├── build_tool_config.json     上次建库的参数（相机/ROI/目标库规模/骨干）
+├── inspect_tool.py            模型检查：骨干、库规模、阈值、meta 一致性
+├── onnx_infer.py              ONNX 推理与分数验证
+├── infer_custom.py            单图推理调试
+├── requirements-frozen.txt    依赖锁定
+├── setup_env.sh               环境初始化脚本
+├── 启动建库工具.bat            双击启动建库 Web UI
+├── 启动检测工具.bat            双击启动检测界面
+├── tools/                     开发期分析脚本（47 个，见文末清单）
+└── docs/
+```
+
+---
+
+## 快速开始
+
+环境要求：Python 3.9+；建库建议有 NVIDIA GPU（CPU 也能建，只是慢）。
 
 ```bash
-cd python
 pip install -r requirements-frozen.txt
 
-# Windows 直接双击
-启动建库工具.bat        # 打开建库 Web UI（默认 http://127.0.0.1:8766）
-启动检测工具.bat        # 打开检测/验证界面
+# Windows 下直接双击
+启动建库工具.bat     # 建库界面，默认 http://127.0.0.1:8766
 ```
 
-核心脚本：
+建库流程：
 
-| 脚本 | 用途 |
-|---|---|
-| `build_tool.py` | 建库主程序：读 OK 图 → 提特征 → 建记忆库 → 导出 ONNX |
-| `build_tool_ui.html` | 建库界面（单页，由 build_tool.py 提供） |
-| `onnx_infer.py` | ONNX 模型推理与分数验证 |
-| `inspect_tool.py` | 模型检查：骨干、库规模、阈值、meta 一致性 |
-| `infer_custom.py` | 单图推理调试 |
-
-**建库要点**
-
-- 只用 OK 图，**不要混入 NG**，否则记忆库会被污染、NG 分数被拉平。
-- 每个相机必须**各自建库**。记忆库绑定该工位的成像条件（光源/物距/ROI），
-  拿 A 机的库跑 B 机必然成片误报。
-- 输出两个文件，必须成对部署：
-  - `patchcore_roi.onnx` —— 模型本体
-  - `meta_v2.json` —— 阈值、正常均值、ROI、骨干名等元数据
+1. 准备一个目录，只放**正常（OK）样本**，建议 100 张以上
+2. 在界面里选相机通道、框 ROI、设置目标库规模与骨干
+3. 建库 → 自动导出 `patchcore_roi.onnx` + `meta_v2.json`
+4. 用 `启动检测工具.bat` 或 `onnx_infer.py` 验证效果
+5. 用 `tools/calibrate_*.py` 标定阈值
 
 ---
 
-## C# 集成到 Vision 框架
+## 模型形态
 
-源码位置：`csharp/Sen.Engine/VisionTool/patchcore/`
+当前是 **v2 形态**（`tools/build_v2.py`）：**ROI 不固化在图里**。
 
-| 文件 | 职责 |
+```
+外部按 ROI 整数裁剪 → 送进 ONNX
+  图内：缩放到 256 → 中心裁剪 224 → 归一化 → 骨干提特征 → 与记忆库算 KNN 距离
+  输出：score（异常分）+ anomaly_map（224×224 热图）
+```
+
+这样设计的原因：ROI 随工位调整，固化在模型里会导致换 ROI 就得重建库。
+代价是**调用方必须保证裁剪方式与建库时一致**（整数裁剪，不要插值缩放）。
+
+> 若调用方额外做了重采样，特征就和建库时对不上。实测用非抗锯齿的 LINEAR 代替
+> 建库时的抗锯齿缩放，正常料的分数会翻倍并被判成 NG。
+
+### 两个文件必须成对
+
+| 文件 | 内容 |
 |---|---|
-| `PatchCoreEngine.cs` | 推理封装，与工具类解耦，可单独测试 |
-| `PatchCoreModel.cs` | 参数模型（可 BinaryFormatter 序列化进工程文件） |
-| `PatchCoreTool.cs` | 工具主体：取图、判定、写 PLC、显示 |
-| `UcPatchCoreTool.cs` / `.Designer.cs` | 参数界面（左参数 / 右显示） |
+| `patchcore_roi.onnx` | 模型本体（骨干 + 记忆库） |
+| `meta_v2.json` | ROI、阈值、正常均值、骨干名、库规模、生成时间戳 |
 
-工具通过**反射**被框架发现，依赖三个静态属性：
-
-```csharp
-public new static string GroupInfo { get; private set; } = "PatchCore";
-public new static string ToolType  { get; private set; } = "PatchCore";
-public new static string Explains  { get; private set; } = "无监督缺陷检测...";
-```
-
-运行画面通过 `IGroupShowObj` 接口注册：
-
-```csharp
-public string GroupShowName => ToolName + ".PatchCore";   // 例：PatchCore1.PatchCore
-public void AddGroupShowOjbs(HWndCtrl mView, string ToolName) { ... }
-```
-
-> ⚠️ 注册只是第一步。**运行视图是否真的显示，取决于工位设置里的显示项勾选**
-> （`VsToolGroup.ShowObjNames` 白名单）。新建工具默认不会自动加入白名单 ——
-> 这是框架层的历史设计，使用时要到「工位设置 → 显示项」里手动勾选并保存工程。
-
-### 与 YOLO 工具的语义差异
-
-| | YOLO | PatchCore |
-|---|---|---|
-| 分数方向 | Score 越大越好 | 异常分**越大越差** |
-| 结果形态 | 检测框 | 热图超阈值后的连通域 |
-| 训练数据 | 需要标注 | 只用 OK 图 |
-| 写 PLC | 原始分数 | 默认转置信度（保持 PLC 比较方向不变） |
+只换其中一个会导致阈值/ROI 错位。`inspect_tool.py` 可以检查两者是否一致。
 
 ---
 
-## GPU 加速
+## 关键概念
 
-推理走 ONNX Runtime **CUDA EP**。ORT 1.17.3 的 GPU 包是按 **CUDA 11.8 + cuDNN 8** 编译的，
-这一点没法绕（依赖库里写死了 `_110` / `_11` ABI 后缀）。
+**为什么每台相机必须独立建库**
+记忆库记录的是"这批像素长什么样"。换一台相机、换一次打光、动一次物距，
+成像条件就变了，拿 A 机的库跑 B 机必然成片误报。
+`tools/crosscam_validate.py` 与 `tools/test_cross_machine.py` 就是验证这件事的实验，
+结论是**归一化只能缓解、不能消除**（见 `tools/test_norm_verdict.py`）。
 
-需要放到 **exe 同目录**的文件：
+**库规模（coreset 目标数）**
+记忆库越大越准，但也越慢、越占内存。实测 3000 → 6000 时 OK 侧余量从 15.7% 提升到 17.5%，
+NG 检出率不变。`tools/bench_tradeoff.py` 和 `tools/validate_pct.py` 用来找自己场景的拐点。
 
-```
-cudart64_110.dll        cublas64_11.dll       cublasLt64_11.dll
-cufft64_10.dll          cudnn64_8.dll         zlibwapi.dll
-cudnn_ops_infer64_8.dll cudnn_cnn_infer64_8.dll cudnn_adv_infer64_8.dll
-onnxruntime_providers_shared.dll  onnxruntime_providers_cuda.dll
-```
+**阈值**
+异常分**越大越差**（与 YOLO 的 score 方向相反）。阈值取"OK 侧最大值"与"NG 侧最小值"之间的
+空档，见 `tools/calibrate_threshold.py`。正常料平均分记录在 `meta_v2.json` 的 `normal_mean`。
 
-> `onnxruntime_providers_*.dll` 在 NuGet 包里位于 `runtimes/win-x64/native/`，
-> **必须提到 exe 根目录**。ORT 的 provider 加载器走 Win32 `LoadLibrary`，
-> 不会去 `runtimes` 子目录找。
+**骨干**
+默认 `resnet50`。`tools/try_backbones.py` 做过 resnet18/34/50、wide_resnet50 的对比：
+更小的骨干更快但小缺陷灵敏度下降，纹理类场景 wide_resnet50 更稳。
 
-### 实测（RTX 3060 Laptop，单张，n=20~30 中位数）
+---
 
-| 模型 | CPU | CUDA | 加速 |
-|---|---|---|---|
-| PatchCore（ROI 1236×1249） | 60.65 ms | **14.73 ms** | 4.12 x |
-| YOLO（640²，作对照） | 101.79 ms | **11.18 ms** | 9.10 x |
-
-### 三个必须知道的坑
-
-**1. `AppendExecutionProvider("CUDA", dict)` 不可用**
-
-ORT 1.17.3 的通用重载只支持 QNN/SNPE/XNNPACK/AZURE，会抛：
-
-```
-Only QNN, SNPE, XNNPACK and AZURE execution providers can be enabled by this method.
-```
-
-CUDA 必须走专用重载：
-
-```csharp
-var o = new OrtCUDAProviderOptions();
-o.UpdateOptions(new Dictionary<string, string> {
-    ["device_id"] = "0",
-    ["gpu_mem_limit"] = (2L * 1024 * 1024 * 1024).ToString(),  // 4GB 卡（如 GTX 1650）必须限
-    ["arena_extend_strategy"] = "kSameAsRequested",
-    ["cudnn_conv_algo_search"] = "HEURISTIC",
-    ["do_copy_in_default_stream"] = "1",
-});
-so.AppendExecutionProvider_CUDA(o);
-```
-
-**2. 线程池自旋会把 CPU 吃满**
-
-ORT 默认 `session.intra_op.allow_spinning = 1`，CPU 线程池在等 GPU 的空档里是**忙等**。
-表现为「GPU 明明在跑，任务管理器 CPU 却 50%」。实测（16 逻辑核）：
-
-| 配置 | 延迟 | 进程 CPU |
-|---|---|---|
-| 默认 | 15.09 ms | 49% |
-| 关自旋 | **13.43 ms** | **8%** |
-| 关自旋 + `IntraOpNumThreads=1` | 20.92 ms | 6% |
-
-关闭方式（**不要**再叠加 `IntraOpNumThreads=1`，会慢到 20.9ms）：
-
-```csharp
-so.AddSessionConfigEntry("session.intra_op.allow_spinning", "0");
-so.AddSessionConfigEntry("session.inter_op.allow_spinning", "0");
-```
-
-**3. `LoadLibrary failed with error 126` 通常是依赖缺失，不是文件不存在**
-
-可能是缺 provider 本体，也可能是它依赖的 cudnn/cublas 没到位。
-用 `bench/GpuProbe` 可以逐个 dll 真实加载探测，直接点名缺哪个：
+## 阈值标定
 
 ```bash
-cd bench/GpuProbe && dotnet publish -c Release -r win-x64 --self-contained false -o publish
-# 把 publish 整个目录拷到目标机，双击 GpuProbe.exe
+# 用「无偏 OK 分数 + NG 分数」联合扫描
+python tools/calibrate_threshold.py
+
+# 一体化 ONNX 模型的全量标定
+python tools/calibrate_e2e.py
 ```
 
----
-
-## 诊断工具
-
-| 工具 | 用途 |
-|---|---|
-| `bench/GpuProbe` | GPU 体检：驱动版本、provider 文件、5 个 CUDA 运行时 dll、CPU/CUDA 会话实测 |
-| `bench/PcGpuBench` | PatchCore 单张延迟 CPU vs CUDA 对比，内置进程 CPU 占用统计 |
-| `bench/YoloGpuBench` | YOLO 侧同样的对比（`cn.YoloV3`） |
-
-三个工具都默认从 `XVision/bin/Debug/net8.0-windows` 引用 ORT 与模型，
-换机器时改 csproj 里的 `Vb` 路径即可。
+标定需要两批数据：**建库时没用过的 OK 图**、**若干 NG 图**。
+只用建库的 OK 图算阈值会偏乐观（那些图已经被记忆库"记住"了），
+应使用 `tools/validate_ok_batch.py` 的留出法。
 
 ---
 
-## 已知限制
+## 性能参考
 
-- C# 部分依赖 `Sen.Engine` 框架，脱离框架无法编译；`csharp/probe_tool` 可独立运行。
-- 模型与 `meta_v2.json` 是成对的，替换任一需同步，否则阈值/ROI 会错位。
-- ORT 1.17.3 锁定 CUDA 11.8 —— 装 CUDA 12.x 无效，ABI 不兼容。
-- 4GB 显存卡（GTX 1650 等）务必设置 `gpu_mem_limit`，默认 arena 会翻倍扩张。
+ONNX Runtime，输入按 ROI 裁剪后（单通道灰度），单张推理中位数：
+
+| 场景 | CPU | GPU (RTX 3060 Laptop) |
+|---|---|---|
+| PatchCore（ROI 1236×1249） | 60.7 ms | 14.7 ms |
+
+- GPU 侧建议设置 `gpu_mem_limit`（如 2GB）。默认 arena 会按倍数扩张，
+  在 4GB 显存卡（GTX 1650 等）上容易被啃光。
+- ORT 1.17.x 的 GPU 包锁定 **CUDA 11.8 + cuDNN 8**（依赖库里是 `cudart64_110` /
+  `cublas64_11` / `cudnn64_8` 这些 ABI 后缀），装 CUDA 12.x 无效。
+
+---
+
+## 工具脚本（tools/）
+
+开发过程中沉淀的分析脚本，按用途分组。多数脚本头部有 docstring 说明，
+部分脚本里写死了本机路径，用前先改。
+
+**建库 / 导出**
+`train_custom.py` 用自建正常样本建库 · `train_own.py` 自建数据集建库 ·
+`build_v2.py` 重建 v2 模型（ROI 外置） · `export_onnx.py` 导出 ONNX + 记忆库 ·
+`export_e2e_onnx.py` 导出一体化 ONNX（图进、分数+热图出） ·
+`export_fast_base.py` 导出提速骨干模板 · `rebuild_cam.py` 按当前骨干重建某相机库 ·
+`repack_cam.py` 换骨干重拼 ONNX（库不动） · `custom_dataset.py` 自定义数据集适配器
+
+**阈值标定**
+`calibrate_threshold.py` · `calibrate_v2.py` · `calibrate_e2e.py`
+
+**验证 / 评估**
+`validate_ng.py` NG 检出能力 · `validate_ok_batch.py` OK 留出法（误报率） ·
+`validate_pct.py` coreset 比例影响 · `eval_ng.py` / `eval_ng2.py` NG 评估 ·
+`eval_all.py` MVTec AD 15 子类批量评测 · `verify_onnx.py` 与 PyTorch 数值一致性 ·
+`verify_e2e.py` 一体化 ONNX 与原链路一致性 · `verify_scores.py` 新旧模型分数与耗时对比 ·
+`check_resize_onnx.py` 下采样实现对比
+
+**跨机台 / 归一化**
+`crosscam_validate.py` 跨相机库通用性 · `test_cross_machine.py` 归一化能否消除分数偏移 ·
+`test_norm_verdict.py` 归一化的能力边界（3 组实验） · `norm_pipeline.py` 跨机台图像归一化 ·
+`site_config.py` 多机台部署配置
+
+**性能基准**
+`bench_backends.py` torch-GPU / torch-CPU / onnx-CPU 三后端对比 ·
+`bench_cpu.py` CPU 推理速度 · `bench_knn_onnx.py` 记忆库烘焙进 ONNX 图 ·
+`bench_tradeoff.py` 速度与精度权衡 · `try_backbones.py` 骨干对比
+
+**分析 / 复核 / 报告**
+`heatmap_123.py` / `heatmap_selfbuilt.py` 高分来源定位 · `vis_ng.py` NG 检出可视化 ·
+`review_top.py` 可疑图复核 · `probe_test_folder.py` / `crossval_test_folder.py` 交叉验证 ·
+`check_ng_corr.py` / `check_ng_overlap.py` 数据泄漏核查 ·
+`make_report*.py` 各类 HTML 报告 · `check_env.py` 环境自检
+
+---
+
+## 常见问题
+
+**Q：正常料被判成 NG**
+先查三件事：① 建库用的 OK 图里有没有混入真实缺陷（`tools/make_report_audit.py` 可以审查）；
+② 调用方裁剪/缩放方式是否与建库一致；③ 库规模是不是太小。
+
+**Q：NG 检不出来**
+看热图（`tools/heatmap_*.py`）确认缺陷位置有没有异常响应。若热图上毫无反应，
+说明该缺陷在特征空间里和正常纹理不可分，换骨干或加大库规模试试；
+若热图有响应但面积小，是 `min_area` 卡掉了。
+
+**Q：换一台机器就全乱了**
+正常现象，见上文"为什么每台相机必须独立建库"。不要试图用一个库跑多台机器。
 
 ---
 

@@ -1,6 +1,6 @@
 # ============================================================
 # PatchCore Tool —— 忽略规则
-# 原则：只入库源码与文档；模型、数据、运行时二进制、构建产物一律不入库
+# 原则：只入库源码与文档；模型、数据、运行时、构建产物一律不入库
 # ============================================================
 
 # ---------------- Python ----------------
@@ -18,30 +18,20 @@ ENV/
 dist/
 build/
 
-# ---------------- .NET ----------------
-bin/
-obj/
-.vs/
-*.user
-*.suo
-*.userprefs
-*.cache
-TestResults/
-[Dd]ebug/
-[Rr]elease/
-
-# ---------------- 模型权重（体积大，各自现场生成） ----------------
+# ---------------- 模型权重（体积大，每台机器各自建库生成） ----------------
 *.onnx
 *.pt
 *.pth
 *.pkl
 *.pk
-# 注意：不要写 *.engine —— Windows 下 git 忽略大小写，
-# 它会连 csharp/Sen.Engine/ 这个目录一起吞掉（目录名以 .Engine 结尾）。
-*.trt
-*.plan
 *.h5
 *.pb
+# 注意：不要写 *.engine —— Windows 下 git 忽略大小写，
+# 它会把任何以 .Engine 结尾的目录一起吞掉。需要排除 TensorRT 文件时用 *.trt / *.plan。
+*.trt
+*.plan
+
+# 建库产出目录
 models/
 models_onnx/
 ok_data/
@@ -52,7 +42,7 @@ data/
 datasets/
 patchcore_roi.onnx*
 
-# ---------------- 推理/GPU 运行时（约 2GB，随程序分发，不入库） ----------------
+# ---------------- 推理 / GPU 运行时（体积大，随环境安装） ----------------
 cudart64_*.dll
 cublas64_*.dll
 cublasLt64_*.dll
@@ -61,20 +51,7 @@ cudnn*.dll
 nvrtc*.dll
 zlibwapi.dll
 onnxruntime.dll
-onnxruntime.lib
 onnxruntime_providers_*
-ManagedCuda.dll
-halcon.dll
-halcondotnet.dll
-MvCameraControl*.dll
-*.dll
-*.lib
-*.pdb
-*.exe
-
-# 例外：确保源码不被误伤
-!**/*.cs
-!**/*.py
 
 # ---------------- 图像 / 日志 / 临时产物 ----------------
 *.jpg
@@ -84,14 +61,11 @@ MvCameraControl*.dll
 *.tiff
 *.gif
 *.log
-*.txt.log
 Logs/
-MvSdkLog/
 *.tmp
 *.temp
 *.bak
 *.bak-*
-*.bak-w*
 *.orig
 *.rej
 *~
@@ -100,13 +74,12 @@ MvSdkLog/
 !docs/**/*.png
 !docs/**/*.svg
 
-# ---------------- 运行时产生的数据文件 ----------------
+# ---------------- 运行期产生的数据 ----------------
 *_202[0-9]-*.json
 prof_*.json
 pc_prof_*.json
 pc2_*.json
 new_prof_*.json
-*.vpr
 
 # ---------------- 编辑器 / 系统 ----------------
 Thumbs.db
